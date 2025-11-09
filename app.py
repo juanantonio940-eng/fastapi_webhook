@@ -100,6 +100,7 @@ def decode_header_part(value: Optional[str]) -> str:
 def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
     """
     Conecta con iCloud IMAP y devuelve los últimos N mensajes con asunto FIFA.
+    Busca todos los mensajes y filtra por asunto en Python.
     """
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
     try:
@@ -110,52 +111,44 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
 
     imap.select("INBOX")
 
-    # Buscar correos con el asunto específico de FIFA
-    search_criteria = 'SUBJECT "FIFA ID | Validate Your Email"'
-    logger.info(f"🔍 Buscando con criterio: {search_criteria}")
+    # Buscar TODOS los correos primero
+    logger.info("🔍 Buscando todos los mensajes en INBOX")
     
-    status, data = imap.search(None, search_criteria)
+    status, data = imap.search(None, "ALL")
     logger.info(f"📧 Status de búsqueda: {status}")
     
     if status != "OK" or not data or not data[0]:
-        logger.warning("⚠️ No se encontraron mensajes de FIFA")
+        logger.warning("⚠️ No se encontraron mensajes")
         imap.logout()
         return []
 
-    ids = data[0].split()
-    logger.info(f"📬 Total de mensajes FIFA encontrados: {len(ids)}")
-    ids = ids[-limit:]  # últimos N mensajes
-    logger.info(f"🎯 IDs a procesar: {ids}")
-
-    messages: List[Message] = []
-
-    for msg_id in ids:
+    all_ids = data[0].split()
+    logger.info(f"📬 Total de mensajes encontrados: {len(all_ids)}")
+    
+    # Procesar de atrás hacia adelante para encontrar los últimos emails de FIFA
+    fifa_messages: List[Message] = []
+    
+    # Invertir la lista para empezar por los más recientes
+    for msg_id in reversed(all_ids):
+        if len(fifa_messages) >= limit:
+            break
+            
         logger.info(f"📩 Procesando mensaje ID: {msg_id}")
         status, msg_data = imap.fetch(msg_id, "(RFC822)")
-        logger.info(f"Status fetch: {status}, Data type: {type(msg_data)}")
         
         if status != "OK" or not msg_data:
             logger.warning(f"⚠️ Error fetching mensaje {msg_id}")
             continue
 
-        # msg_data puede venir en varios formatos:
-        # 1. [(b'FLAGS', b'mensaje')]  <- tupla con flags y mensaje
-        # 2. [b'mensaje']              <- directamente bytes (iCloud)
-        # 3. [(b'FLAGS', None)]        <- sin mensaje
-        
+        # Extraer raw_msg
         raw_msg = None
-        
-        for i, part in enumerate(msg_data):
+        for part in msg_data:
             if isinstance(part, tuple):
-                # Formato estándar: (flags, mensaje)
                 if len(part) >= 2 and isinstance(part[1], (bytes, bytearray)):
                     raw_msg = part[1]
-                    logger.info(f"✅ Raw message encontrado en tupla, tamaño: {len(raw_msg)} bytes")
                     break
             elif isinstance(part, (bytes, bytearray)):
-                # Formato iCloud: directamente bytes
                 raw_msg = part
-                logger.info(f"✅ Raw message encontrado directamente, tamaño: {len(raw_msg)} bytes")
                 break
 
         if not raw_msg:
@@ -169,6 +162,13 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
         date_ = msg.get("Date") or ""
         
         logger.info(f"📨 Subject: {subject}, From: {from_}")
+        
+        # Filtrar por asunto FIFA
+        if "FIFA ID" not in subject or "Validate Your Email" not in subject:
+            logger.info(f"⏭️ Saltando mensaje - no es de FIFA")
+            continue
+        
+        logger.info(f"🎯 ¡Encontrado mensaje de FIFA!")
 
         body = ""
         if msg.is_multipart():
@@ -202,7 +202,7 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
                         body = str(payload)
                         logger.warning(f"⚠️ Error decodificando body: {e}")
 
-        messages.append(
+        fifa_messages.append(
             Message(
                 from_=from_,
                 subject=subject,
@@ -210,11 +210,11 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
                 text=body,
             )
         )
-        logger.info(f"✅ Mensaje agregado correctamente a la lista")
+        logger.info(f"✅ Mensaje FIFA agregado correctamente a la lista")
 
     imap.logout()
-    logger.info(f"📊 Total mensajes procesados: {len(messages)}")
-    return messages
+    logger.info(f"📊 Total mensajes FIFA procesados: {len(fifa_messages)}")
+    return fifa_messages
 
 
 # ------- RUTAS -------
@@ -253,16 +253,3 @@ def handle_webhook(payload: WebhookInput):
         raise HTTPException(status_code=500, detail=f"Error leyendo correo: {e}")
 
     return WebhookResponse(email=payload.email, messages=messages)
-```
-
-**Cambios realizados:**
-
-1. **Búsqueda por asunto específico**: Ahora busca solo correos con `SUBJECT "FIFA ID | Validate Your Email"`
-2. **Log del criterio de búsqueda**: Te muestra qué está buscando
-3. **Mantiene limit=1**: Solo trae el último correo de FIFA
-
-El criterio IMAP `SUBJECT "FIFA ID | Validate Your Email"` buscará correos que contengan ese texto en el asunto. 
-
-Si no encuentra ningún correo con ese asunto, devolverá un array vacío y verás en los logs:
-```
-⚠️ No se encontraron mensajes de FIFA
