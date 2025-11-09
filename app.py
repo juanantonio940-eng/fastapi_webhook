@@ -4,6 +4,7 @@ import email as email_lib
 import email.header
 from typing import List, Optional
 import logging
+from datetime import datetime
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -99,7 +100,7 @@ def decode_header_part(value: Optional[str]) -> str:
 
 def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
     """
-    Conecta con iCloud IMAP y devuelve los últimos N mensajes NO LEÍDOS con asunto FIFA.
+    Conecta con iCloud IMAP y devuelve los últimos N mensajes del DÍA ACTUAL con asunto FIFA.
     """
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
     try:
@@ -110,25 +111,30 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
 
     imap.select("INBOX")
 
-    # Buscar solo mensajes NO LEÍDOS
-    logger.info("🔍 Buscando mensajes NO LEÍDOS (UNSEEN)")
+    # Obtener fecha de hoy en formato IMAP: DD-Mon-YYYY (ej: 09-Nov-2025)
+    today = datetime.now().strftime("%d-%b-%Y")
+    logger.info(f"📅 Fecha de hoy: {today}")
     
-    status, data = imap.search(None, "UNSEEN")
+    # Buscar mensajes desde hoy (SINCE incluye el día especificado)
+    search_criteria = f'SINCE {today}'
+    logger.info(f"🔍 Buscando mensajes del día de hoy: {search_criteria}")
+    
+    status, data = imap.search(None, search_criteria)
     logger.info(f"📧 Status de búsqueda: {status}")
     
     if status != "OK" or not data or not data[0]:
-        logger.warning("⚠️ No se encontraron mensajes no leídos")
+        logger.warning("⚠️ No se encontraron mensajes de hoy")
         imap.logout()
         return []
 
-    unread_ids = data[0].split()
-    logger.info(f"📬 Total de mensajes NO LEÍDOS: {len(unread_ids)}")
+    today_ids = data[0].split()
+    logger.info(f"📬 Total de mensajes de hoy: {len(today_ids)}")
     
     # Procesar de atrás hacia adelante para encontrar los últimos emails de FIFA
     fifa_messages: List[Message] = []
     
     # Invertir la lista para empezar por los más recientes
-    for msg_id in reversed(unread_ids):
+    for msg_id in reversed(today_ids):
         if len(fifa_messages) >= limit:
             break
             
@@ -162,7 +168,7 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
         
         logger.info(f"📨 Subject: '{subject}', From: '{from_}'")
         
-        # Filtrar por asunto FIFA (si el subject está vacío, no es de FIFA)
+        # Filtrar por asunto FIFA
         if not subject or ("FIFA ID" not in subject and "Validate Your Email" not in subject):
             logger.info(f"⏭️ Saltando mensaje - no es de FIFA")
             continue
