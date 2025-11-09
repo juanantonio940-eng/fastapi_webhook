@@ -109,11 +109,6 @@ def extract_otp_code(text: str) -> Optional[str]:
         return None
     
     # Buscar 6 dígitos consecutivos
-    # Patrones comunes en emails de verificación:
-    # - "código: 123456"
-    # - "123456"
-    # - "código de verificación: 123456"
-    
     patterns = [
         r'código[:\s]+(\d{6})',  # código: 123456
         r'code[:\s]+(\d{6})',     # code: 123456
@@ -134,7 +129,8 @@ def extract_otp_code(text: str) -> Optional[str]:
 
 def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
     """
-    Conecta con iCloud IMAP y devuelve los últimos N mensajes del DÍA ACTUAL con asunto que contiene "FIFA ID".
+    Conecta con iCloud IMAP y devuelve los últimos N mensajes NO LEÍDOS del día actual con asunto que contiene "FIFA ID".
+    Marca los mensajes como leídos después de procesarlos.
     """
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
     try:
@@ -149,26 +145,26 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
     today = datetime.now().strftime("%d-%b-%Y")
     logger.info(f"📅 Fecha de hoy: {today}")
     
-    # Buscar mensajes desde hoy (SINCE incluye el día especificado)
-    search_criteria = f'SINCE {today}'
-    logger.info(f"🔍 Buscando mensajes del día de hoy: {search_criteria}")
+    # Buscar mensajes NO LEÍDOS desde hoy
+    search_criteria = f'(UNSEEN SINCE {today})'
+    logger.info(f"🔍 Buscando mensajes NO LEÍDOS del día de hoy: {search_criteria}")
     
     status, data = imap.search(None, search_criteria)
     logger.info(f"📧 Status de búsqueda: {status}")
     
     if status != "OK" or not data or not data[0]:
-        logger.warning("⚠️ No se encontraron mensajes de hoy")
+        logger.warning("⚠️ No se encontraron mensajes no leídos de hoy")
         imap.logout()
         return []
 
-    today_ids = data[0].split()
-    logger.info(f"📬 Total de mensajes de hoy: {len(today_ids)}")
+    unread_ids = data[0].split()
+    logger.info(f"📬 Total de mensajes NO LEÍDOS de hoy: {len(unread_ids)}")
     
     # Procesar de atrás hacia adelante para encontrar los últimos emails de FIFA
     fifa_messages: List[Message] = []
     
     # Invertir la lista para empezar por los más recientes
-    for msg_id in reversed(today_ids):
+    for msg_id in reversed(unread_ids):
         if len(fifa_messages) >= limit:
             break
             
@@ -220,7 +216,7 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
             logger.warning(f"⚠️ Error parseando headers: {e}")
             continue
         
-        # Ahora obtener el mensaje completo usando BODY[] en lugar de RFC822
+        # Ahora obtener el mensaje completo usando BODY[]
         logger.info(f"📥 Obteniendo mensaje completo con BODY[]")
         status, msg_data = imap.fetch(msg_id, "(BODY[])")
         
@@ -310,6 +306,13 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
             
             if otp_code:
                 logger.info(f"🎉 Código OTP extraído exitosamente: {otp_code}")
+                
+                # Marcar el mensaje como leído
+                try:
+                    imap.store(msg_id, '+FLAGS', '\\Seen')
+                    logger.info(f"✅ Mensaje {msg_id} marcado como LEÍDO")
+                except Exception as e:
+                    logger.warning(f"⚠️ Error marcando mensaje como leído: {e}")
             else:
                 logger.warning(f"⚠️ No se encontró código OTP en el mensaje")
                 logger.info(f"📝 Primeros 500 chars del body: {body[:500]}")
