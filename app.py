@@ -100,7 +100,7 @@ def decode_header_part(value: Optional[str]) -> str:
 
 def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
     """
-    Conecta con iCloud IMAP y devuelve los últimos N mensajes del DÍA ACTUAL con asunto FIFA.
+    Conecta con iCloud IMAP y devuelve los últimos N mensajes del DÍA ACTUAL con asunto que contiene "FIFA ID".
     """
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
     try:
@@ -168,9 +168,9 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
         
         logger.info(f"📨 Subject: '{subject}', From: '{from_}'")
         
-        # Filtrar por asunto FIFA
-        if not subject or ("FIFA ID" not in subject and "Validate Your Email" not in subject):
-            logger.info(f"⏭️ Saltando mensaje - no es de FIFA")
+        # Filtrar por asunto que contenga "FIFA ID"
+        if not subject or "FIFA ID" not in subject:
+            logger.info(f"⏭️ Saltando mensaje - no contiene 'FIFA ID' en el asunto")
             continue
         
         logger.info(f"🎯 ¡Encontrado mensaje de FIFA!")
