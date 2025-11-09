@@ -134,22 +134,25 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
             logger.warning(f"⚠️ Error fetching mensaje {msg_id}")
             continue
 
-        # Debug: ver qué contiene msg_data
-        logger.info(f"msg_data estructura: {[type(x) for x in msg_data]}")
-
-        # A veces msg_data puede ser [(b'ID (FLAGS)', b'mensaje')] o [(b'ID (FLAGS)', None)]
-        # Filtramos correctamente para evitar tu error:
+        # msg_data puede venir en varios formatos:
+        # 1. [(b'FLAGS', b'mensaje')]  <- tupla con flags y mensaje
+        # 2. [b'mensaje']              <- directamente bytes (iCloud)
+        # 3. [(b'FLAGS', None)]        <- sin mensaje
+        
         raw_msg = None
+        
         for i, part in enumerate(msg_data):
-            logger.info(f"Part {i} - type: {type(part)}")
             if isinstance(part, tuple):
-                logger.info(f"Part {i} - tuple length: {len(part)}")
-                if len(part) >= 2:
-                    logger.info(f"Part {i}[1] - type: {type(part[1])}, is bytes: {isinstance(part[1], (bytes, bytearray))}")
-                if isinstance(part[1], (bytes, bytearray)):
+                # Formato estándar: (flags, mensaje)
+                if len(part) >= 2 and isinstance(part[1], (bytes, bytearray)):
                     raw_msg = part[1]
-                    logger.info(f"✅ Raw message encontrado, tamaño: {len(raw_msg)} bytes")
+                    logger.info(f"✅ Raw message encontrado en tupla, tamaño: {len(raw_msg)} bytes")
                     break
+            elif isinstance(part, (bytes, bytearray)):
+                # Formato iCloud: directamente bytes
+                raw_msg = part
+                logger.info(f"✅ Raw message encontrado directamente, tamaño: {len(raw_msg)} bytes")
+                break
 
         if not raw_msg:
             logger.warning(f"⚠️ No se pudo extraer raw_msg del mensaje {msg_id}")
@@ -169,7 +172,6 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
             for part in msg.walk():
                 content_type = part.get_content_type()
                 content_disposition = str(part.get("Content-Disposition", ""))
-                logger.info(f"  Part content-type: {content_type}, disposition: {content_disposition}")
                 
                 if (
                     content_type == "text/plain"
