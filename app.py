@@ -72,45 +72,64 @@ def get_account(email_in: str) -> Optional[dict]:
 # ------- HELPERS IMAP (iCloud) -------
 
 def decode_header_part(value: Optional[str]) -> str:
+    """
+    Decodifica cualquier encabezado MIME (Subject, From, etc.)
+    """
     if not value:
         return ""
-    dh = email_lib.header.decode_header(value)[0]
-    data, enc = dh
-    if isinstance(data, bytes):
-        try:
-            return data.decode(enc or "utf-8", errors="ignore")
-        except Exception:
-            return data.decode("utf-8", errors="ignore")
-    return data
+    try:
+        decoded_parts = email_lib.header.decode_header(value)
+        decoded_str = ""
+        for part, enc in decoded_parts:
+            if isinstance(part, bytes):
+                decoded_str += part.decode(enc or "utf-8", errors="ignore")
+            elif isinstance(part, str):
+                decoded_str += part
+            else:
+                decoded_str += str(part)
+        return decoded_str
+    except Exception:
+        return str(value)
 
 
-def fetch_last_messages(
-    icloud_user: str, icloud_pass: str, limit: int = 1
-) -> List[Message]:
+def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
+    """
+    Conecta con iCloud IMAP y devuelve los últimos N mensajes de la bandeja de entrada.
+    """
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
-    imap.login(icloud_user, icloud_pass)
+    try:
+        imap.login(icloud_user, icloud_pass)
+    except imaplib.IMAP4.error as e:
+        raise Exception(f"Error autenticando en iCloud: {e}")
+
     imap.select("INBOX")
 
     status, data = imap.search(None, "ALL")
-    if status != "OK":
-        imap.logout()
-        raise Exception("No se pudo buscar en el buzón")
-
-    ids = data[0].split()
-    if not ids:
+    if status != "OK" or not data or not data[0]:
         imap.logout()
         return []
 
-    ids = ids[-limit:]  # últimos N
+    ids = data[0].split()
+    ids = ids[-limit:]  # últimos N mensajes
 
     messages: List[Message] = []
 
     for msg_id in ids:
         status, msg_data = imap.fetch(msg_id, "(RFC822)")
-        if status != "OK":
+        if status != "OK" or not msg_data:
             continue
 
-        raw_msg = msg_data[0][1]
+        # A veces msg_data puede ser [(b'ID (FLAGS)', b'mensaje')] o [(b'ID (FLAGS)', None)]
+        # Filtramos correctamente para evitar tu error:
+        raw_msg = None
+        for part in msg_data:
+            if isinstance(part, tuple) and isinstance(part[1], (bytes, bytearray)):
+                raw_msg = part[1]
+                break
+
+        if not raw_msg:
+            continue
+
         msg = email_lib.message_from_bytes(raw_msg)
 
         subject = decode_header_part(msg.get("Subject"))
@@ -126,13 +145,19 @@ def fetch_last_messages(
                 ):
                     payload = part.get_payload(decode=True)
                     if payload:
-                        body = payload.decode(errors="ignore")
+                        try:
+                            body = payload.decode(errors="ignore")
+                        except Exception:
+                            body = str(payload)
                         break
         else:
             if msg.get_content_type() == "text/plain":
                 payload = msg.get_payload(decode=True)
                 if payload:
-                    body = payload.decode(errors="ignore")
+                    try:
+                        body = payload.decode(errors="ignore")
+                    except Exception:
+                        body = str(payload)
 
         messages.append(
             Message(
