@@ -239,7 +239,7 @@ def handle_webhook(payload: WebhookInput):
 
     # 2) Leer correos de iCloud
     try:
-        messages = fetch_last_messages(icloud_user, icloud_pass, limit=5)
+        messages = fetch_last_messages(icloud_user, icloud_pass, limit=1)
         logger.info(f"✅ Mensajes obtenidos: {len(messages)}")
     except imaplib.IMAP4.error as e:
         logger.error(f"❌ Error IMAP: {e}")
