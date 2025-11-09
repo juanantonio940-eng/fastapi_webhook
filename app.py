@@ -99,8 +99,7 @@ def decode_header_part(value: Optional[str]) -> str:
 
 def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
     """
-    Conecta con iCloud IMAP y devuelve los últimos N mensajes con asunto FIFA.
-    Busca todos los mensajes y filtra por asunto en Python.
+    Conecta con iCloud IMAP y devuelve los últimos N mensajes NO LEÍDOS con asunto FIFA.
     """
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
     try:
@@ -111,25 +110,25 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
 
     imap.select("INBOX")
 
-    # Buscar TODOS los correos primero
-    logger.info("🔍 Buscando todos los mensajes en INBOX")
+    # Buscar solo mensajes NO LEÍDOS
+    logger.info("🔍 Buscando mensajes NO LEÍDOS (UNSEEN)")
     
-    status, data = imap.search(None, "ALL")
+    status, data = imap.search(None, "UNSEEN")
     logger.info(f"📧 Status de búsqueda: {status}")
     
     if status != "OK" or not data or not data[0]:
-        logger.warning("⚠️ No se encontraron mensajes")
+        logger.warning("⚠️ No se encontraron mensajes no leídos")
         imap.logout()
         return []
 
-    all_ids = data[0].split()
-    logger.info(f"📬 Total de mensajes encontrados: {len(all_ids)}")
+    unread_ids = data[0].split()
+    logger.info(f"📬 Total de mensajes NO LEÍDOS: {len(unread_ids)}")
     
     # Procesar de atrás hacia adelante para encontrar los últimos emails de FIFA
     fifa_messages: List[Message] = []
     
     # Invertir la lista para empezar por los más recientes
-    for msg_id in reversed(all_ids):
+    for msg_id in reversed(unread_ids):
         if len(fifa_messages) >= limit:
             break
             
@@ -161,10 +160,10 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
         from_ = decode_header_part(msg.get("From"))
         date_ = msg.get("Date") or ""
         
-        logger.info(f"📨 Subject: {subject}, From: {from_}")
+        logger.info(f"📨 Subject: '{subject}', From: '{from_}'")
         
-        # Filtrar por asunto FIFA
-        if "FIFA ID" not in subject or "Validate Your Email" not in subject:
+        # Filtrar por asunto FIFA (si el subject está vacío, no es de FIFA)
+        if not subject or ("FIFA ID" not in subject and "Validate Your Email" not in subject):
             logger.info(f"⏭️ Saltando mensaje - no es de FIFA")
             continue
         
