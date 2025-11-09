@@ -5,6 +5,7 @@ import email.header
 from typing import List, Optional
 import logging
 from datetime import datetime
+import re
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -35,7 +36,7 @@ class Message(BaseModel):
     from_: str
     subject: str
     date: str
-    text: str
+    otp_code: Optional[str]  # Código OTP de 6 dígitos
 
 
 class WebhookResponse(BaseModel):
@@ -97,6 +98,38 @@ def decode_header_part(value: Optional[str]) -> str:
     except Exception as e:
         logger.warning(f"⚠️ Error decodificando header: {e}")
         return str(value) if value else ""
+
+
+def extract_otp_code(text: str) -> Optional[str]:
+    """
+    Extrae el código OTP de 6 dígitos del texto del email.
+    Busca patrones como: 123456, o "código: 123456", etc.
+    """
+    if not text:
+        return None
+    
+    # Buscar 6 dígitos consecutivos
+    # Patrones comunes en emails de verificación:
+    # - "código: 123456"
+    # - "123456"
+    # - "código de verificación: 123456"
+    
+    patterns = [
+        r'código[:\s]+(\d{6})',  # código: 123456
+        r'code[:\s]+(\d{6})',     # code: 123456
+        r'verification[:\s]+(\d{6})',  # verification: 123456
+        r'\b(\d{6})\b',           # cualquier número de 6 dígitos aislado
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            otp = match.group(1)
+            logger.info(f"🔑 OTP encontrado: {otp}")
+            return otp
+    
+    logger.warning("⚠️ No se encontró código OTP en el texto")
+    return None
 
 
 def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
@@ -191,39 +224,28 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
         logger.info(f"📥 Obteniendo mensaje completo con BODY[]")
         status, msg_data = imap.fetch(msg_id, "(BODY[])")
         
-        logger.info(f"📊 Fetch status: {status}, msg_data type: {type(msg_data)}, length: {len(msg_data)}")
-        
         if status != "OK" or not msg_data:
             logger.warning(f"⚠️ Error fetching mensaje completo {msg_id}")
             continue
 
-        # Extraer raw_msg - iCloud puede devolver formato diferente
+        # Extraer raw_msg
         raw_msg = None
         
         for i, part in enumerate(msg_data):
-            logger.info(f"🔍 Part {i}: type={type(part)}")
-            
             if isinstance(part, tuple):
-                logger.info(f"  Tuple length: {len(part)}")
                 if len(part) >= 2:
-                    logger.info(f"  Part[0] type: {type(part[0])}")
-                    logger.info(f"  Part[1] type: {type(part[1])}")
                     if isinstance(part[1], (bytes, bytearray)):
                         raw_msg = part[1]
                         logger.info(f"✅ Raw message encontrado en tupla[1], tamaño: {len(raw_msg)} bytes")
                         break
             elif isinstance(part, (bytes, bytearray)):
-                # A veces viene directamente como bytes
                 if len(part) > 100:  # Debe ser más grande que metadata
                     raw_msg = part
                     logger.info(f"✅ Raw message encontrado directamente, tamaño: {len(raw_msg)} bytes")
                     break
-                else:
-                    logger.info(f"  Bytes muy pequeño, probablemente metadata: {len(part)} bytes")
 
         if not raw_msg:
             logger.error(f"❌ No se pudo extraer raw_msg del mensaje {msg_id}")
-            logger.error(f"   msg_data completo: {msg_data}")
             continue
 
         # Parsear el mensaje
@@ -243,8 +265,6 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
                     content_type = part.get_content_type()
                     content_disposition = str(part.get("Content-Disposition", ""))
                     
-                    logger.info(f"  Part: {content_type}, disposition: {content_disposition}")
-                    
                     if (
                         content_type == "text/plain"
                         and "attachment" not in content_disposition
@@ -261,7 +281,6 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
             else:
                 logger.info("📄 Mensaje es single-part")
                 content_type = msg.get_content_type()
-                logger.info(f"  Content-Type: {content_type}")
                 
                 if content_type == "text/plain":
                     payload = msg.get_payload(decode=True)
@@ -273,7 +292,6 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
                             body = str(payload)
                             logger.warning(f"⚠️ Error decodificando body: {e}")
                 elif content_type == "text/html":
-                    # Si solo hay HTML, también lo extraemos
                     payload = msg.get_payload(decode=True)
                     if payload:
                         try:
@@ -285,16 +303,23 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
 
             if not body:
                 logger.warning(f"⚠️ No se pudo extraer body del mensaje")
-                # Intentar obtener cualquier contenido
                 body = str(msg.get_payload())
-                logger.info(f"📝 Usando payload raw como body: {body[:200]}")
+
+            # Extraer el código OTP del body
+            otp_code = extract_otp_code(body)
+            
+            if otp_code:
+                logger.info(f"🎉 Código OTP extraído exitosamente: {otp_code}")
+            else:
+                logger.warning(f"⚠️ No se encontró código OTP en el mensaje")
+                logger.info(f"📝 Primeros 500 chars del body: {body[:500]}")
 
             fifa_messages.append(
                 Message(
                     from_=from_,
-                    subject=subject_full or subject,  # Usar el que no esté vacío
+                    subject=subject_full or subject,
                     date=date_,
-                    text=body,
+                    otp_code=otp_code,
                 )
             )
             logger.info(f"✅ Mensaje FIFA agregado correctamente a la lista")
