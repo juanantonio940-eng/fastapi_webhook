@@ -37,6 +37,7 @@ class Message(BaseModel):
     subject: str
     date: str
     otp_code: Optional[str]  # Código OTP de 6 dígitos
+    to: str  # A quién fue enviado el correo
 
 
 class WebhookResponse(BaseModel):
@@ -127,9 +128,30 @@ def extract_otp_code(text: str) -> Optional[str]:
     return None
 
 
-def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
+def extract_recipient_email(header_text: str) -> Optional[str]:
     """
-    Conecta con iCloud IMAP y devuelve los últimos N mensajes NO LEÍDOS del día actual con asunto que contiene "FIFA ID".
+    Extrae el email del destinatario desde los headers.
+    Busca en To:, Delivered-To:, X-Original-To:, etc.
+    """
+    recipient = None
+    
+    for line in header_text.split('\n'):
+        line_lower = line.lower()
+        if line_lower.startswith('delivered-to:') or line_lower.startswith('to:') or line_lower.startswith('x-original-to:'):
+            # Extraer el email de la línea
+            email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', line)
+            if email_match:
+                recipient = email_match.group(0).lower()
+                logger.info(f"📬 Destinatario encontrado: {recipient}")
+                return recipient
+    
+    return recipient
+
+
+def fetch_last_messages(icloud_user: str, icloud_pass: str, target_email: str, limit: int = 1) -> List[Message]:
+    """
+    Conecta con iCloud IMAP y devuelve los últimos N mensajes NO LEÍDOS del día actual con asunto que contiene "FIFA ID"
+    y que fueron enviados específicamente al target_email.
     Marca los mensajes como leídos después de procesarlos.
     """
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
@@ -144,6 +166,7 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
     # Obtener fecha de hoy en formato IMAP: DD-Mon-YYYY (ej: 09-Nov-2025)
     today = datetime.now().strftime("%d-%b-%Y")
     logger.info(f"📅 Fecha de hoy: {today}")
+    logger.info(f"🎯 Buscando correos para: {target_email}")
     
     # Buscar mensajes NO LEÍDOS desde hoy
     search_criteria = f'(UNSEEN SINCE {today})'
@@ -163,6 +186,9 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
     # Procesar de atrás hacia adelante para encontrar los últimos emails de FIFA
     fifa_messages: List[Message] = []
     
+    # Normalizar el email objetivo para comparación
+    target_email_lower = target_email.lower().strip()
+    
     # Invertir la lista para empezar por los más recientes
     for msg_id in reversed(unread_ids):
         if len(fifa_messages) >= limit:
@@ -170,8 +196,8 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
             
         logger.info(f"📩 Procesando mensaje ID: {msg_id}")
         
-        # Primero obtener solo los headers para verificar el asunto
-        status, header_data = imap.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
+        # Primero obtener headers completos para verificar destinatario y asunto
+        status, header_data = imap.fetch(msg_id, "(BODY.PEEK[HEADER])")
         
         if status != "OK" or not header_data:
             logger.warning(f"⚠️ Error fetching headers del mensaje {msg_id}")
@@ -195,7 +221,7 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
         try:
             header_text = header_bytes.decode('utf-8', errors='ignore')
             
-            # Extraer Subject manualmente
+            # Extraer Subject
             subject = ""
             for line in header_text.split('\n'):
                 if line.lower().startswith('subject:'):
@@ -211,6 +237,22 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
                 continue
             
             logger.info(f"🎯 ¡Encontrado mensaje de FIFA!")
+            
+            # Extraer destinatario del email
+            recipient_email = extract_recipient_email(header_text)
+            
+            if not recipient_email:
+                logger.warning(f"⚠️ No se pudo extraer el email destinatario")
+                continue
+            
+            logger.info(f"🔍 Comparando destinatario: '{recipient_email}' vs solicitado: '{target_email_lower}'")
+            
+            # Verificar que el correo fue enviado al email solicitado
+            if recipient_email.lower() != target_email_lower:
+                logger.info(f"⏭️ Saltando mensaje - destinatario '{recipient_email}' no coincide con '{target_email_lower}'")
+                continue
+            
+            logger.info(f"✅ Correo destinado a {target_email_lower} - procesando...")
             
         except Exception as e:
             logger.warning(f"⚠️ Error parseando headers: {e}")
@@ -250,9 +292,10 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
 
             subject_full = decode_header_part(msg.get("Subject"))
             from_ = decode_header_part(msg.get("From"))
+            to_ = decode_header_part(msg.get("To"))
             date_ = msg.get("Date") or ""
             
-            logger.info(f"📧 Email parseado - Subject: '{subject_full}', From: '{from_}'")
+            logger.info(f"📧 Email parseado - Subject: '{subject_full}', From: '{from_}', To: '{to_}'")
 
             body = ""
             if msg.is_multipart():
@@ -323,6 +366,7 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
                     subject=subject_full or subject,
                     date=date_,
                     otp_code=otp_code,
+                    to=to_ or recipient_email,
                 )
             )
             logger.info(f"✅ Mensaje FIFA agregado correctamente a la lista")
@@ -362,7 +406,8 @@ def handle_webhook(payload: WebhookInput):
 
     # 2) Leer correos de iCloud
     try:
-        messages = fetch_last_messages(icloud_user, icloud_pass, limit=1)
+        # Pasar el email objetivo para filtrar
+        messages = fetch_last_messages(icloud_user, icloud_pass, payload.email, limit=1)
         logger.info(f"✅ Mensajes obtenidos: {len(messages)}")
     except imaplib.IMAP4.error as e:
         logger.error(f"❌ Error IMAP: {e}")
