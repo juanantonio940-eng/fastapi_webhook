@@ -142,7 +142,7 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
         logger.info(f"📩 Procesando mensaje ID: {msg_id}")
         
         # Primero obtener solo los headers para verificar el asunto
-        status, header_data = imap.fetch(msg_id, "(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])")
+        status, header_data = imap.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
         
         if status != "OK" or not header_data:
             logger.warning(f"⚠️ Error fetching headers del mensaje {msg_id}")
@@ -165,7 +165,6 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
         # Parsear los headers
         try:
             header_text = header_bytes.decode('utf-8', errors='ignore')
-            logger.info(f"📋 Headers raw: {header_text[:200]}")  # Log primeros 200 chars
             
             # Extraer Subject manualmente
             subject = ""
@@ -188,77 +187,121 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
             logger.warning(f"⚠️ Error parseando headers: {e}")
             continue
         
-        # Ahora sí, obtener el mensaje completo
-        status, msg_data = imap.fetch(msg_id, "(RFC822)")
+        # Ahora obtener el mensaje completo usando BODY[] en lugar de RFC822
+        logger.info(f"📥 Obteniendo mensaje completo con BODY[]")
+        status, msg_data = imap.fetch(msg_id, "(BODY[])")
+        
+        logger.info(f"📊 Fetch status: {status}, msg_data type: {type(msg_data)}, length: {len(msg_data)}")
         
         if status != "OK" or not msg_data:
             logger.warning(f"⚠️ Error fetching mensaje completo {msg_id}")
             continue
 
-        # Extraer raw_msg
+        # Extraer raw_msg - iCloud puede devolver formato diferente
         raw_msg = None
-        for part in msg_data:
+        
+        for i, part in enumerate(msg_data):
+            logger.info(f"🔍 Part {i}: type={type(part)}")
+            
             if isinstance(part, tuple):
-                if len(part) >= 2 and isinstance(part[1], (bytes, bytearray)):
-                    raw_msg = part[1]
-                    break
+                logger.info(f"  Tuple length: {len(part)}")
+                if len(part) >= 2:
+                    logger.info(f"  Part[0] type: {type(part[0])}")
+                    logger.info(f"  Part[1] type: {type(part[1])}")
+                    if isinstance(part[1], (bytes, bytearray)):
+                        raw_msg = part[1]
+                        logger.info(f"✅ Raw message encontrado en tupla[1], tamaño: {len(raw_msg)} bytes")
+                        break
             elif isinstance(part, (bytes, bytearray)):
-                raw_msg = part
-                break
+                # A veces viene directamente como bytes
+                if len(part) > 100:  # Debe ser más grande que metadata
+                    raw_msg = part
+                    logger.info(f"✅ Raw message encontrado directamente, tamaño: {len(raw_msg)} bytes")
+                    break
+                else:
+                    logger.info(f"  Bytes muy pequeño, probablemente metadata: {len(part)} bytes")
 
         if not raw_msg:
-            logger.warning(f"⚠️ No se pudo extraer raw_msg del mensaje {msg_id}")
+            logger.error(f"❌ No se pudo extraer raw_msg del mensaje {msg_id}")
+            logger.error(f"   msg_data completo: {msg_data}")
             continue
 
-        msg = email_lib.message_from_bytes(raw_msg)
+        # Parsear el mensaje
+        try:
+            msg = email_lib.message_from_bytes(raw_msg)
 
-        subject = decode_header_part(msg.get("Subject"))
-        from_ = decode_header_part(msg.get("From"))
-        date_ = msg.get("Date") or ""
-        
-        logger.info(f"📧 Email completo - Subject: '{subject}', From: '{from_}'")
+            subject_full = decode_header_part(msg.get("Subject"))
+            from_ = decode_header_part(msg.get("From"))
+            date_ = msg.get("Date") or ""
+            
+            logger.info(f"📧 Email parseado - Subject: '{subject_full}', From: '{from_}'")
 
-        body = ""
-        if msg.is_multipart():
-            logger.info("📄 Mensaje es multipart")
-            for part in msg.walk():
-                content_type = part.get_content_type()
-                content_disposition = str(part.get("Content-Disposition", ""))
+            body = ""
+            if msg.is_multipart():
+                logger.info("📄 Mensaje es multipart")
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get("Content-Disposition", ""))
+                    
+                    logger.info(f"  Part: {content_type}, disposition: {content_disposition}")
+                    
+                    if (
+                        content_type == "text/plain"
+                        and "attachment" not in content_disposition
+                    ):
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            try:
+                                body = payload.decode(errors="ignore")
+                                logger.info(f"✅ Body extraído (multipart), tamaño: {len(body)} chars")
+                            except Exception as e:
+                                body = str(payload)
+                                logger.warning(f"⚠️ Error decodificando body: {e}")
+                            break
+            else:
+                logger.info("📄 Mensaje es single-part")
+                content_type = msg.get_content_type()
+                logger.info(f"  Content-Type: {content_type}")
                 
-                if (
-                    content_type == "text/plain"
-                    and "attachment" not in content_disposition
-                ):
-                    payload = part.get_payload(decode=True)
+                if content_type == "text/plain":
+                    payload = msg.get_payload(decode=True)
                     if payload:
                         try:
                             body = payload.decode(errors="ignore")
-                            logger.info(f"✅ Body extraído (multipart), tamaño: {len(body)} chars")
+                            logger.info(f"✅ Body extraído (single-part), tamaño: {len(body)} chars")
                         except Exception as e:
                             body = str(payload)
                             logger.warning(f"⚠️ Error decodificando body: {e}")
-                        break
-        else:
-            logger.info("📄 Mensaje es single-part")
-            if msg.get_content_type() == "text/plain":
-                payload = msg.get_payload(decode=True)
-                if payload:
-                    try:
-                        body = payload.decode(errors="ignore")
-                        logger.info(f"✅ Body extraído (single-part), tamaño: {len(body)} chars")
-                    except Exception as e:
-                        body = str(payload)
-                        logger.warning(f"⚠️ Error decodificando body: {e}")
+                elif content_type == "text/html":
+                    # Si solo hay HTML, también lo extraemos
+                    payload = msg.get_payload(decode=True)
+                    if payload:
+                        try:
+                            body = payload.decode(errors="ignore")
+                            logger.info(f"✅ Body HTML extraído, tamaño: {len(body)} chars")
+                        except Exception as e:
+                            body = str(payload)
+                            logger.warning(f"⚠️ Error decodificando body HTML: {e}")
 
-        fifa_messages.append(
-            Message(
-                from_=from_,
-                subject=subject,
-                date=date_,
-                text=body,
+            if not body:
+                logger.warning(f"⚠️ No se pudo extraer body del mensaje")
+                # Intentar obtener cualquier contenido
+                body = str(msg.get_payload())
+                logger.info(f"📝 Usando payload raw como body: {body[:200]}")
+
+            fifa_messages.append(
+                Message(
+                    from_=from_,
+                    subject=subject_full or subject,  # Usar el que no esté vacío
+                    date=date_,
+                    text=body,
+                )
             )
-        )
-        logger.info(f"✅ Mensaje FIFA agregado correctamente a la lista")
+            logger.info(f"✅ Mensaje FIFA agregado correctamente a la lista")
+            
+        except Exception as e:
+            logger.error(f"❌ Error parseando mensaje: {e}")
+            continue
 
     imap.logout()
     logger.info(f"📊 Total mensajes FIFA procesados: {len(fifa_messages)}")
