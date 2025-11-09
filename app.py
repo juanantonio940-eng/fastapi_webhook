@@ -17,16 +17,31 @@ IMAP_SERVERS = {
     "zoho.eu": "imap.zoho.eu",
 }
 
-def get_server(email_address):
+def get_server(email_address: str):
+    """Obtiene el servidor IMAP en función del dominio del correo"""
+    if not email_address or "@" not in email_address:
+        return None
     domain = email_address.split("@")[-1]
-    return IMAP_SERVERS.get(domain, None)
+    return IMAP_SERVERS.get(domain)
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        return {"error": "El cuerpo de la solicitud no es un JSON válido"}
+
     email_address = data.get("email")
     password = data.get("password")  # Contraseña de aplicación
     result = {"email": email_address, "messages": []}
+
+    if not email_address:
+        result["messages"].append({"error": "Falta el campo 'email'"})
+        return result
+
+    if not password:
+        result["messages"].append({"error": "Falta el campo 'password'"})
+        return result
 
     server = get_server(email_address)
     if not server:
@@ -53,6 +68,9 @@ async def webhook(request: Request):
         mail_ids = messages[0].split()[-5:]
         for mail_id in mail_ids:
             _, msg_data = imap.fetch(mail_id, "(RFC822)")
+            if not msg_data or not msg_data[0]:
+                continue
+
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
 
@@ -62,7 +80,7 @@ async def webhook(request: Request):
 
             result["messages"].append({
                 "from": msg.get("From"),
-                "subject": subject,
+                "subject": subject or "(Sin asunto)",
             })
 
         imap.close()
@@ -71,6 +89,6 @@ async def webhook(request: Request):
     except imaplib.IMAP4.error as e:
         result["messages"].append({"error": f"IMAP error: {str(e)}"})
     except Exception as e:
-        result["messages"].append({"error": str(e)})
+        result["messages"].append({"error": f"Error inesperado: {str(e)}"})
 
     return result
