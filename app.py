@@ -99,7 +99,7 @@ def decode_header_part(value: Optional[str]) -> str:
 
 def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
     """
-    Conecta con iCloud IMAP y devuelve los últimos N mensajes de la bandeja de entrada.
+    Conecta con iCloud IMAP y devuelve los últimos N mensajes con asunto FIFA.
     """
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
     try:
@@ -110,16 +110,20 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
 
     imap.select("INBOX")
 
-    status, data = imap.search(None, "ALL")
+    # Buscar correos con el asunto específico de FIFA
+    search_criteria = 'SUBJECT "FIFA ID | Validate Your Email"'
+    logger.info(f"🔍 Buscando con criterio: {search_criteria}")
+    
+    status, data = imap.search(None, search_criteria)
     logger.info(f"📧 Status de búsqueda: {status}")
     
     if status != "OK" or not data or not data[0]:
-        logger.warning("⚠️ No se encontraron mensajes o búsqueda falló")
+        logger.warning("⚠️ No se encontraron mensajes de FIFA")
         imap.logout()
         return []
 
     ids = data[0].split()
-    logger.info(f"📬 Total de mensajes encontrados: {len(ids)}")
+    logger.info(f"📬 Total de mensajes FIFA encontrados: {len(ids)}")
     ids = ids[-limit:]  # últimos N mensajes
     logger.info(f"🎯 IDs a procesar: {ids}")
 
@@ -249,3 +253,16 @@ def handle_webhook(payload: WebhookInput):
         raise HTTPException(status_code=500, detail=f"Error leyendo correo: {e}")
 
     return WebhookResponse(email=payload.email, messages=messages)
+```
+
+**Cambios realizados:**
+
+1. **Búsqueda por asunto específico**: Ahora busca solo correos con `SUBJECT "FIFA ID | Validate Your Email"`
+2. **Log del criterio de búsqueda**: Te muestra qué está buscando
+3. **Mantiene limit=1**: Solo trae el último correo de FIFA
+
+El criterio IMAP `SUBJECT "FIFA ID | Validate Your Email"` buscará correos que contengan ese texto en el asunto. 
+
+Si no encuentra ningún correo con ese asunto, devolverá un array vacío y verás en los logs:
+```
+⚠️ No se encontraron mensajes de FIFA
