@@ -94,8 +94,9 @@ def decode_header_part(value: Optional[str]) -> str:
             else:
                 decoded_str += str(part)
         return decoded_str
-    except Exception:
-        return str(value)
+    except Exception as e:
+        logger.warning(f"⚠️ Error decodificando header: {e}")
+        return str(value) if value else ""
 
 
 def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> List[Message]:
@@ -139,10 +140,59 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
             break
             
         logger.info(f"📩 Procesando mensaje ID: {msg_id}")
+        
+        # Primero obtener solo los headers para verificar el asunto
+        status, header_data = imap.fetch(msg_id, "(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])")
+        
+        if status != "OK" or not header_data:
+            logger.warning(f"⚠️ Error fetching headers del mensaje {msg_id}")
+            continue
+        
+        # Extraer headers
+        header_bytes = None
+        for part in header_data:
+            if isinstance(part, tuple) and len(part) >= 2:
+                header_bytes = part[1]
+                break
+            elif isinstance(part, bytes):
+                header_bytes = part
+                break
+        
+        if not header_bytes:
+            logger.warning(f"⚠️ No se pudieron extraer headers del mensaje {msg_id}")
+            continue
+        
+        # Parsear los headers
+        try:
+            header_text = header_bytes.decode('utf-8', errors='ignore')
+            logger.info(f"📋 Headers raw: {header_text[:200]}")  # Log primeros 200 chars
+            
+            # Extraer Subject manualmente
+            subject = ""
+            for line in header_text.split('\n'):
+                if line.lower().startswith('subject:'):
+                    subject = line.split(':', 1)[1].strip()
+                    subject = decode_header_part(subject)
+                    break
+            
+            logger.info(f"📨 Subject extraído: '{subject}'")
+            
+            # Filtrar por asunto que contenga "FIFA ID" (case-insensitive)
+            if not subject or "fifa id" not in subject.lower():
+                logger.info(f"⏭️ Saltando mensaje - no contiene 'FIFA ID' en el asunto")
+                continue
+            
+            logger.info(f"🎯 ¡Encontrado mensaje de FIFA!")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error parseando headers: {e}")
+            continue
+        
+        # Ahora sí, obtener el mensaje completo
         status, msg_data = imap.fetch(msg_id, "(RFC822)")
         
         if status != "OK" or not msg_data:
-            logger.warning(f"⚠️ Error fetching mensaje {msg_id}")
+            logger.warning(f"⚠️ Error fetching mensaje completo {msg_id}")
             continue
 
         # Extraer raw_msg
@@ -166,14 +216,7 @@ def fetch_last_messages(icloud_user: str, icloud_pass: str, limit: int = 1) -> L
         from_ = decode_header_part(msg.get("From"))
         date_ = msg.get("Date") or ""
         
-        logger.info(f"📨 Subject: '{subject}', From: '{from_}'")
-        
-        # Filtrar por asunto que contenga "FIFA ID"
-        if not subject or "FIFA ID" not in subject:
-            logger.info(f"⏭️ Saltando mensaje - no contiene 'FIFA ID' en el asunto")
-            continue
-        
-        logger.info(f"🎯 ¡Encontrado mensaje de FIFA!")
+        logger.info(f"📧 Email completo - Subject: '{subject}', From: '{from_}'")
 
         body = ""
         if msg.is_multipart():
