@@ -3,6 +3,7 @@ import imaplib
 import email
 from email.header import decode_header
 import ssl
+import sqlite3  # Puedes cambiarlo por MySQL o PostgreSQL según tu entorno
 
 app = FastAPI()
 
@@ -17,30 +18,32 @@ IMAP_SERVERS = {
     "zoho.eu": "imap.zoho.eu",
 }
 
-def get_server(email_address: str):
-    """Obtiene el servidor IMAP en función del dominio del correo"""
-    if not email_address or "@" not in email_address:
-        return None
+def get_server(email_address):
     domain = email_address.split("@")[-1]
-    return IMAP_SERVERS.get(domain)
+    return IMAP_SERVERS.get(domain, None)
+
+def get_password_from_db(email_address: str):
+    """
+    Obtiene la contraseña asociada al email desde la base de datos.
+    Ajusta los nombres de tabla y columna según tu estructura real.
+    """
+    conn = sqlite3.connect("usuarios.db")  # Cambia por tu conexión real
+    cursor = conn.cursor()
+    cursor.execute("SELECT password FROM cuentas WHERE email = ?", (email_address,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        return {"error": "El cuerpo de la solicitud no es un JSON válido"}
-
+    data = await request.json()
     email_address = data.get("email")
-    password = data.get("password")  # Contraseña de aplicación
     result = {"email": email_address, "messages": []}
 
-    if not email_address:
-        result["messages"].append({"error": "Falta el campo 'email'"})
-        return result
-
+    # Recuperar contraseña desde la BD
+    password = get_password_from_db(email_address)
     if not password:
-        result["messages"].append({"error": "Falta el campo 'password'"})
+        result["messages"].append({"error": f"No se encontró contraseña para {email_address}"})
         return result
 
     server = get_server(email_address)
@@ -53,13 +56,11 @@ async def webhook(request: Request):
         context = ssl.create_default_context()
         imap = imaplib.IMAP4_SSL(server, 993, ssl_context=context)
 
-        # Inicio de sesión con contraseña de aplicación
+        # Inicio de sesión con contraseña recuperada
         imap.login(email_address, password)
-
-        # Seleccionamos la bandeja de entrada
         imap.select("INBOX")
 
-        # Buscamos los últimos 5 mensajes
+        # Obtener los últimos 5 correos
         status, messages = imap.search(None, "ALL")
         if status != "OK":
             result["messages"].append({"error": "No se pudieron obtener los mensajes"})
@@ -68,9 +69,6 @@ async def webhook(request: Request):
         mail_ids = messages[0].split()[-5:]
         for mail_id in mail_ids:
             _, msg_data = imap.fetch(mail_id, "(RFC822)")
-            if not msg_data or not msg_data[0]:
-                continue
-
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
 
@@ -80,7 +78,7 @@ async def webhook(request: Request):
 
             result["messages"].append({
                 "from": msg.get("From"),
-                "subject": subject or "(Sin asunto)",
+                "subject": subject,
             })
 
         imap.close()
@@ -89,6 +87,6 @@ async def webhook(request: Request):
     except imaplib.IMAP4.error as e:
         result["messages"].append({"error": f"IMAP error: {str(e)}"})
     except Exception as e:
-        result["messages"].append({"error": f"Error inesperado: {str(e)}"})
+        result["messages"].append({"error": str(e)})
 
     return result
