@@ -1,5 +1,4 @@
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
 import imaplib
 import email
 from email.header import decode_header
@@ -7,70 +6,71 @@ import ssl
 
 app = FastAPI()
 
-# --- MODELO DE DATOS ---
-class EmailRequest(BaseModel):
-    email: str
-    password: str = ""  # opcional, para cuentas que no usen app password
-    imap_server: str = "imap.mail.me.com"  # iCloud por defecto
-    limit: int = 5  # cantidad de mensajes a devolver
+# Servidores IMAP por proveedor
+IMAP_SERVERS = {
+    "icloud.com": "imap.mail.me.com",
+    "gmail.com": "imap.gmail.com",
+    "outlook.com": "outlook.office365.com",
+    "hotmail.com": "outlook.office365.com",
+    "gmx.com": "imap.gmx.com",
+    "web.de": "imap.web.de",
+    "zoho.eu": "imap.zoho.eu",
+}
 
-# --- FUNCIÓN PARA LEER CORREOS ---
-def leer_correos(imap_server, email_user, password, limit):
-    mensajes = []
+def get_server(email_address):
+    domain = email_address.split("@")[-1]
+    return IMAP_SERVERS.get(domain, None)
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    email_address = data.get("email")
+    password = data.get("password")  # Contraseña de aplicación
+    result = {"email": email_address, "messages": []}
+
+    server = get_server(email_address)
+    if not server:
+        result["messages"].append({"error": "Proveedor no soportado"})
+        return result
+
     try:
+        # Conexión segura con SSL
         context = ssl.create_default_context()
-        mail = imaplib.IMAP4_SSL(imap_server, 993, ssl_context=context)
-        mail.login(email_user, password)
-        mail.select("INBOX")
+        imap = imaplib.IMAP4_SSL(server, 993, ssl_context=context)
 
-        # Buscar los correos más recientes
-        status, data = mail.search(None, "ALL")
+        # Inicio de sesión con contraseña de aplicación
+        imap.login(email_address, password)
+
+        # Seleccionamos la bandeja de entrada
+        imap.select("INBOX")
+
+        # Buscamos los últimos 5 mensajes
+        status, messages = imap.search(None, "ALL")
         if status != "OK":
-            return mensajes
+            result["messages"].append({"error": "No se pudieron obtener los mensajes"})
+            return result
 
-        ids = data[0].split()
-        ultimos = ids[-limit:]
+        mail_ids = messages[0].split()[-5:]
+        for mail_id in mail_ids:
+            _, msg_data = imap.fetch(mail_id, "(RFC822)")
+            raw_email = msg_data[0][1]
+            msg = email.message_from_bytes(raw_email)
 
-        for num in reversed(ultimos):
-            status, data = mail.fetch(num, "(RFC822)")
-            if status != "OK":
-                continue
-
-            msg = email.message_from_bytes(data[0][1])
             subject, encoding = decode_header(msg["Subject"])[0]
             if isinstance(subject, bytes):
                 subject = subject.decode(encoding or "utf-8", errors="ignore")
 
-            from_ = msg.get("From")
-            date_ = msg.get("Date")
-
-            # obtener texto plano
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    ctype = part.get_content_type()
-                    cdisp = str(part.get("Content-Disposition"))
-                    if ctype == "text/plain" and "attachment" not in cdisp:
-                        body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
-                        break
-            else:
-                body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
-
-            mensajes.append({
+            result["messages"].append({
+                "from": msg.get("From"),
                 "subject": subject,
-                "from": from_,
-                "date": date_,
-                "snippet": body[:200].replace("\n", " ")
             })
 
-        mail.logout()
+        imap.close()
+        imap.logout()
+
+    except imaplib.IMAP4.error as e:
+        result["messages"].append({"error": f"IMAP error: {str(e)}"})
     except Exception as e:
-        mensajes.append({"error": str(e)})
+        result["messages"].append({"error": str(e)})
 
-    return mensajes
-
-# --- ENDPOINT PRINCIPAL ---
-@app.post("/webhook")
-async def webhook(req: EmailRequest):
-    emails = leer_correos(req.imap_server, req.email, req.password, req.limit)
-    return {"email": req.email, "messages": emails}
+    return result
